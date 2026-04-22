@@ -1,7 +1,13 @@
 [package]
 name = "oxink"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
+description = "ANSI style and color conversion primitives for CLI rendering."
+license = "MIT"
+repository = "https://github.com/iamwjun/Oxink"
+readme = "README.md"
+keywords = ["ansi", "cli", "color", "terminal"]
+categories = ["command-line-interface"]
 
 [dependencies]
 
