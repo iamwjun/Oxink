@@ -1,12 +1,12 @@
 [package]
 name = "oxink"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
-description = "ANSI style and color conversion primitives for CLI rendering."
+description = "ANSI styling, terminal color helpers, and slash-command input components for Rust CLIs."
 license = "MIT"
 repository = "https://github.com/iamwjun/Oxink"
 readme = "README.md"
-keywords = ["ansi", "cli", "color", "terminal"]
+keywords = ["ansi", "cli", "terminal", "input", "tui"]
 categories = ["command-line-interface"]
 
 [dependencies]
