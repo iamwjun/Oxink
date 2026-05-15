@@ -1,6 +1,6 @@
 [package]
 name = "oxink"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "ANSI style and color conversion primitives for CLI rendering."
 license = "MIT"

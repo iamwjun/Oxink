@@ -1,5 +1,7 @@
 # Oxink
 
+![SlashInput preview](examples/demo.png)
+
 Oxink is a small Rust library for CLI rendering primitives and terminal input
 state. It exposes ANSI style codes, foreground/background color helpers, color
 conversion utilities, and a slash-command input component that are useful when
@@ -32,7 +34,7 @@ Add Oxink to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxink = "0.1.1"
+oxink = "0.1.3"
 ```
 
 If you are using the local repository directly:
@@ -97,10 +99,6 @@ assert_eq!(input.value(), "/history ");
 let view = input.render();
 println!("{view}");
 ```
-
-Rendered preview:
-
-![SlashInput preview](docs/slash-input-demo.svg)
 
 Update dropdown options from outside:
 
