@@ -1,10 +1,12 @@
-use crate::styles::{ANSI_STYLES, BLUE, WHITE};
+use crate::styles::{ANSI_STYLES, BLUE, GRAY, WHITE};
 use std::fmt;
+use std::io::{self, Write};
 use std::ops::{BitOr, BitOrAssign};
 
 pub const DEFAULT_INPUT_WIDTH: usize = 28;
-const DROPDOWN_TOP_PADDING: usize = 1;
+const DROPDOWN_TOP_PADDING: usize = 0;
 const DROPDOWN_VERTICAL_SPACING: usize = 0;
+const MAX_VISIBLE_DROPDOWN_OPTIONS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeyModifiers(u8);
@@ -129,6 +131,10 @@ fn selected_dropdown_color_escape() -> String {
 
 fn unselected_dropdown_color() -> TerminalColor {
     TerminalColor::Ansi16(WHITE.open)
+}
+
+fn unselected_dropdown_description_color() -> TerminalColor {
+    TerminalColor::Ansi16(GRAY.open)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,13 +273,88 @@ impl fmt::Display for InputView {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct InputRenderer {
+    rendered_rows: usize,
+    cursor_row: usize,
+    terminal_columns: usize,
+}
+
+impl InputRenderer {
+    pub fn new(terminal_columns: usize) -> Self {
+        Self {
+            rendered_rows: 0,
+            cursor_row: 0,
+            terminal_columns: terminal_columns.max(1),
+        }
+    }
+
+    pub fn render<W: Write>(&mut self, output: &mut W, input: &SlashInput) -> io::Result<()> {
+        self.render_view(output, &input.render_with_terminal_width(self.terminal_columns))
+    }
+
+    pub fn render_view<W: Write>(&mut self, output: &mut W, view: &InputView) -> io::Result<()> {
+        self.clear(output)?;
+
+        for (index, line) in view.lines.iter().enumerate() {
+            write!(output, "{line}")?;
+            if index + 1 < view.lines.len() {
+                output.write_all(b"\r\n")?;
+            }
+        }
+
+        let rows = view
+            .lines
+            .iter()
+            .map(|line| display_rows(line, self.terminal_columns))
+            .collect::<Vec<_>>();
+        let cursor_row_offset = view.cursor_column / self.terminal_columns;
+        let cursor_column = view.cursor_column % self.terminal_columns;
+        let absolute_cursor_display_row =
+            rows.iter().take(view.cursor_row).sum::<usize>() + cursor_row_offset;
+        let total_rows = rows.iter().sum::<usize>();
+        let lines_up = total_rows.saturating_sub(absolute_cursor_display_row + 1);
+        if lines_up > 0 {
+            write!(output, "\x1B[{lines_up}A")?;
+        }
+        write!(output, "\r")?;
+        if cursor_column > 0 {
+            write!(output, "\x1B[{}C", cursor_column)?;
+        }
+        write!(output, "\x1B[?25h")?;
+        output.flush()?;
+
+        self.rendered_rows = total_rows;
+        self.cursor_row = absolute_cursor_display_row;
+        Ok(())
+    }
+
+    pub fn clear<W: Write>(&mut self, output: &mut W) -> io::Result<()> {
+        if self.rendered_rows == 0 {
+            return Ok(());
+        }
+
+        write!(output, "\r")?;
+        if self.cursor_row > 0 {
+            write!(output, "\x1B[{}A", self.cursor_row)?;
+        }
+        write!(output, "\x1B[0J\x1B[?25h")?;
+        output.flush()?;
+
+        self.rendered_rows = 0;
+        self.cursor_row = 0;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashInput {
     options: Vec<InputOption>,
     value: String,
     cursor: usize,
-    min_width: usize,
+    input_width: Option<usize>,
     theme: InputTheme,
+    header_lines: Vec<String>,
     dropdown_open: bool,
     selected_suggestion: usize,
 }
@@ -284,7 +365,16 @@ impl SlashInput {
         I: IntoIterator<Item = S>,
         S: Into<InputOption>,
     {
-        Self::with_min_width(options, DEFAULT_INPUT_WIDTH)
+        Self {
+            options: collect_options(options),
+            value: String::new(),
+            cursor: 0,
+            input_width: None,
+            theme: InputTheme::default(),
+            header_lines: Vec::new(),
+            dropdown_open: false,
+            selected_suggestion: 0,
+        }
     }
 
     pub fn with_min_width<I, S>(options: I, min_width: usize) -> Self
@@ -296,8 +386,9 @@ impl SlashInput {
             options: collect_options(options),
             value: String::new(),
             cursor: 0,
-            min_width: resolve_input_width(Some(min_width)),
+            input_width: normalize_input_width(Some(min_width)),
             theme: InputTheme::default(),
+            header_lines: Vec::new(),
             dropdown_open: false,
             selected_suggestion: 0,
         }
@@ -316,12 +407,12 @@ impl SlashInput {
     }
 
     pub fn with_input_width(mut self, input_width: Option<usize>) -> Self {
-        self.min_width = resolve_input_width(input_width);
+        self.input_width = normalize_input_width(input_width);
         self
     }
 
     pub fn set_input_width(&mut self, input_width: Option<usize>) {
-        self.min_width = resolve_input_width(input_width);
+        self.input_width = normalize_input_width(input_width);
     }
 
     pub fn with_options<I, S>(mut self, options: I) -> Self
@@ -345,6 +436,27 @@ impl SlashInput {
 
     pub fn theme(&self) -> &InputTheme {
         &self.theme
+    }
+
+    pub fn header_lines(&self) -> &[String] {
+        &self.header_lines
+    }
+
+    pub fn with_header_lines<I, S>(mut self, lines: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.header_lines = collect_lines(lines);
+        self
+    }
+
+    pub fn set_header_lines<I, S>(&mut self, lines: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.header_lines = collect_lines(lines);
     }
 
     pub fn with_theme(mut self, theme: InputTheme) -> Self {
@@ -467,23 +579,34 @@ impl SlashInput {
     }
 
     pub fn render(&self) -> InputView {
+        self.render_internal(None)
+    }
+
+    pub fn render_with_terminal_width(&self, terminal_columns: usize) -> InputView {
+        self.render_internal(Some(terminal_columns))
+    }
+
+    fn render_internal(&self, terminal_columns: Option<usize>) -> InputView {
         let filtered = self.filtered_options();
-        let width = self.min_width.max(self.value.chars().count());
-        let max_command_width = filtered
+        let (visible_start, visible_end) = self.visible_option_bounds(filtered.len());
+        let visible_options = &filtered[visible_start..visible_end];
+        let width = self.resolve_render_width(terminal_columns);
+        let max_command_width = visible_options
             .iter()
             .map(|option| option.command.chars().count())
             .max()
             .unwrap_or(0);
 
-        let mut lines = Vec::new();
-        let border = self.render_border(width);
+        let mut lines = self.header_lines.clone();
+        let border = self.render_container_fill(width);
         lines.push(border.clone());
         lines.push(self.render_input_line(width));
-        lines.push(border.clone());
+        lines.push(border);
 
-        if !filtered.is_empty() {
+        if !visible_options.is_empty() {
             lines.extend(std::iter::repeat_n(String::new(), DROPDOWN_TOP_PADDING));
-            for (index, option) in filtered.iter().enumerate() {
+            for (visible_index, option) in visible_options.iter().enumerate() {
+                let index = visible_start + visible_index;
                 let is_selected = index == self.selected_suggestion;
                 let foreground = if is_selected {
                     self.theme.selected_text_color
@@ -499,7 +622,7 @@ impl SlashInput {
                     foreground,
                     is_selected,
                 ));
-                if index + 1 < filtered.len() {
+                if visible_index + 1 < visible_options.len() {
                     lines.extend(std::iter::repeat_n(
                         String::new(),
                         DROPDOWN_VERTICAL_SPACING,
@@ -510,18 +633,52 @@ impl SlashInput {
 
         InputView {
             lines,
-            cursor_row: 1,
-            cursor_column: 2 + self.cursor,
+            cursor_row: self.header_lines.len() + 1,
+            cursor_column: 1 + self.cursor,
         }
     }
 
-    fn render_border(&self, width: usize) -> String {
-        let border = format!("+{}+", "-".repeat(width + 2));
+    fn resolve_render_width(&self, terminal_columns: Option<usize>) -> usize {
+        let content_width = self.char_len().max(1);
+
+        match self.input_width {
+            Some(width) => width.max(content_width),
+            None => terminal_columns
+                .map(content_width_from_terminal_columns)
+                .unwrap_or(DEFAULT_INPUT_WIDTH)
+                .max(content_width),
+        }
+    }
+
+    fn visible_option_bounds(&self, filtered_len: usize) -> (usize, usize) {
+        if filtered_len == 0 {
+            return (0, 0);
+        }
+
+        if filtered_len <= MAX_VISIBLE_DROPDOWN_OPTIONS {
+            return (0, filtered_len);
+        }
+
+        let selected = self.selected_suggestion.min(filtered_len - 1);
+        let max_start = filtered_len - MAX_VISIBLE_DROPDOWN_OPTIONS;
+        let start = selected
+            .saturating_add(1)
+            .saturating_sub(MAX_VISIBLE_DROPDOWN_OPTIONS)
+            .min(max_start);
+
+        (start, start + MAX_VISIBLE_DROPDOWN_OPTIONS)
+    }
+
+    fn render_container_fill(&self, width: usize) -> String {
         style_text(
-            &border,
-            self.theme.border_color,
-            self.theme.background_color,
+            &" ".repeat(width + 2),
+            None,
+            self.container_background_color(),
         )
+    }
+
+    fn container_background_color(&self) -> Option<TerminalColor> {
+        self.theme.background_color.or(self.theme.border_color)
     }
 
     fn render_dropdown_line(
@@ -531,39 +688,62 @@ impl SlashInput {
         foreground: Option<TerminalColor>,
         is_selected: bool,
     ) -> String {
-        let mut line = format!(" /{}", option.command);
-        if !option.description.is_empty() {
+        let command_segment = format!(" /{}", option.command);
+        let description_segment = if option.description.is_empty() {
+            None
+        } else {
             let command_width = option.command.chars().count();
             let spacing = 2 + max_command_width.saturating_sub(command_width);
-            line.push_str(&" ".repeat(spacing));
-            line.push_str(&option.description);
+            Some(format!("{}{}", " ".repeat(spacing), option.description))
+        };
+
+        let mut line = command_segment.clone();
+        if let Some(description_segment) = &description_segment {
+            line.push_str(description_segment);
         }
+
         if is_selected && foreground.is_none() {
-            style_text_with_escape(&line, Some(selected_dropdown_color_escape()), None)
-        } else {
-            style_text(&line, foreground, None)
+            return style_text_with_escape(&line, Some(selected_dropdown_color_escape()), None);
         }
+
+        if is_selected {
+            return style_text(&line, foreground, None);
+        }
+
+        let mut rendered = style_text(&command_segment, foreground, None);
+        if let Some(description_segment) = description_segment {
+            rendered.push_str(&style_text(
+                &description_segment,
+                Some(unselected_dropdown_description_color()),
+                None,
+            ));
+        }
+
+        rendered
     }
 
     fn render_input_line(&self, width: usize) -> String {
-        let left = style_text("| ", self.theme.border_color, self.theme.background_color);
+        let background = self.container_background_color();
+        let left = style_text(" ", None, background);
         let body = self.render_input_body(width);
-        let right = style_text(" |", self.theme.border_color, self.theme.background_color);
+        let right = style_text(" ", None, background);
         format!("{left}{body}{right}")
     }
 
     fn render_input_body(&self, width: usize) -> String {
+        let background = self.container_background_color();
+
         if let Some((command, remainder)) = split_applied_command(&self.value) {
             let mut body = String::new();
             body.push_str(&style_text_with_escape(
                 command,
                 Some(command_color_escape()),
-                self.theme.background_color,
+                background,
             ));
             body.push_str(&style_text(
                 remainder,
                 self.theme.text_color,
-                self.theme.background_color,
+                background,
             ));
 
             let visible_len = command.chars().count() + remainder.chars().count();
@@ -571,7 +751,7 @@ impl SlashInput {
                 body.push_str(&style_text(
                     &" ".repeat(width - visible_len),
                     self.theme.text_color,
-                    self.theme.background_color,
+                    background,
                 ));
             }
 
@@ -584,7 +764,7 @@ impl SlashInput {
                     " ".repeat(width - self.value.chars().count())
                 ),
                 self.theme.text_color,
-                self.theme.background_color,
+                background,
             )
         }
     }
@@ -644,11 +824,16 @@ impl SlashInput {
     }
 
     fn move_selection_up(&mut self) {
-        if !self.is_dropdown_visible() {
+        let count = self.filtered_options().len();
+        if count == 0 {
             return;
         }
 
-        self.selected_suggestion = self.selected_suggestion.saturating_sub(1);
+        self.selected_suggestion = if self.selected_suggestion == 0 {
+            count - 1
+        } else {
+            self.selected_suggestion - 1
+        };
     }
 
     fn move_selection_down(&mut self) {
@@ -657,7 +842,11 @@ impl SlashInput {
             return;
         }
 
-        self.selected_suggestion = (self.selected_suggestion + 1).min(count - 1);
+        self.selected_suggestion = if self.selected_suggestion + 1 >= count {
+            0
+        } else {
+            self.selected_suggestion + 1
+        };
     }
 
     fn apply_selected_command(&mut self) -> InputAction {
@@ -704,8 +893,12 @@ fn normalize_command(command: String) -> String {
     command.trim().trim_start_matches('/').to_string()
 }
 
-fn resolve_input_width(input_width: Option<usize>) -> usize {
-    input_width.unwrap_or(DEFAULT_INPUT_WIDTH).max(1)
+fn normalize_input_width(input_width: Option<usize>) -> Option<usize> {
+    input_width.map(|width| width.max(1))
+}
+
+fn content_width_from_terminal_columns(terminal_columns: usize) -> usize {
+    terminal_columns.saturating_sub(2).max(1)
 }
 
 fn collect_options<I, S>(options: I) -> Vec<InputOption>
@@ -718,6 +911,43 @@ where
         .map(Into::into)
         .filter(|option| !option.is_empty())
         .collect()
+}
+
+fn collect_lines<I, S>(lines: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    lines.into_iter().map(Into::into).collect()
+}
+
+fn display_rows(line: &str, terminal_columns: usize) -> usize {
+    let width = visible_text_width(line);
+    width.max(1).div_ceil(terminal_columns.max(1))
+}
+
+fn visible_text_width(text: &str) -> usize {
+    let mut visible_width = 0;
+    let mut chars = text.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if matches!(chars.next(), Some('[')) {
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if !matches!(ch, '\n' | '\r') && !ch.is_control() {
+            visible_width += 1;
+        }
+    }
+
+    visible_width
 }
 
 fn split_applied_command(value: &str) -> Option<(&str, &str)> {
@@ -801,8 +1031,8 @@ mod tests {
         type_text(&mut input, "hello");
 
         let width = DEFAULT_INPUT_WIDTH.max("hello".chars().count());
-        let border = format!("+{}+", "-".repeat(width + 2));
-        let line = format!("| hello{} |", " ".repeat(width - "hello".chars().count()));
+        let border = " ".repeat(width + 2);
+        let line = format!(" hello{} ", " ".repeat(width - "hello".chars().count()));
 
         assert_eq!(input.value(), "hello");
         assert_eq!(input.render().lines, vec![border.clone(), line, border]);
@@ -889,16 +1119,29 @@ mod tests {
     }
 
     #[test]
+    fn container_fill_uses_background_color() {
+        let input = SlashInput::new(["help"]).with_theme(
+            InputTheme::ocean()
+                .with_border_color(TerminalColor::Ansi256(81))
+                .with_background_color(TerminalColor::Ansi256(236)),
+        );
+
+        let view = input.render();
+        assert!(view.lines[0].starts_with("\x1B[48;5;236m "));
+        assert!(view.lines[1].starts_with("\x1B[48;5;236m "));
+    }
+
+    #[test]
     fn input_width_can_be_overridden_or_reset_to_default() {
         let mut input = SlashInput::new(["help"]).with_input_width(Some(12));
         type_text(&mut input, "hello");
 
-        assert_eq!(input.render().lines[0], "+--------------+");
+        assert_eq!(input.render().lines[0], " ".repeat(14));
 
         input.set_input_width(None);
 
         let width = DEFAULT_INPUT_WIDTH.max("hello".chars().count());
-        let border = format!("+{}+", "-".repeat(width + 2));
+        let border = " ".repeat(width + 2);
         assert_eq!(input.render().lines[0], border);
     }
 
@@ -975,9 +1218,10 @@ mod tests {
         );
         type_text(&mut input, "/h");
 
-        let rendered = input.render().as_string();
+        let view = input.render();
+        let rendered = view.as_string();
         assert!(!rendered.contains("> /"));
-        assert!(!rendered.contains("| /"));
+        assert!(!view.lines[3 + DROPDOWN_TOP_PADDING].starts_with("| "));
         assert!(!rendered.contains("\x1B[48;5;238m"));
         assert!(!rendered.contains("\x1B[48;5;31m"));
     }
@@ -991,10 +1235,10 @@ mod tests {
         type_text(&mut input, "/h");
 
         let view = input.render();
-        assert_eq!(view.lines.len(), 6);
-        assert_eq!(view.lines[3], "");
-        assert!(view.lines[4].contains(" /help     Show available commands"));
-        assert!(view.lines[5].contains(" /history  Previous commands"));
+        assert_eq!(view.lines.len(), 3 + DROPDOWN_TOP_PADDING + 2);
+        assert!(view.lines[3 + DROPDOWN_TOP_PADDING].contains(" /help     Show available commands"));
+        assert!(view.lines[4 + DROPDOWN_TOP_PADDING].contains(" /history"));
+        assert!(view.lines[4 + DROPDOWN_TOP_PADDING].contains("  Previous commands"));
     }
 
     #[test]
@@ -1007,6 +1251,92 @@ mod tests {
 
         let rendered = input.render().as_string();
         assert!(rendered.contains("\x1B[34m /help     Show available commands"));
-        assert!(rendered.contains("\x1B[37m /history  Previous commands"));
+        assert!(rendered.contains("\x1B[37m /history\x1B[39m\x1B[90m  Previous commands\x1B[39m"));
+    }
+
+    #[test]
+    fn dropdown_renders_at_most_eight_visible_options() {
+        let options = (1..=10).map(|index| {
+            (
+                format!("help{index}"),
+                format!("Show available command {index}"),
+            )
+        });
+        let mut input = SlashInput::new(options);
+        type_text(&mut input, "/h");
+
+        let view = input.render();
+        let rendered = view.as_string();
+
+        assert_eq!(view.lines.len(), 3 + DROPDOWN_TOP_PADDING + 8);
+        assert!(rendered.contains(" /help1"));
+        assert!(rendered.contains(" /help8"));
+        assert!(!rendered.contains(" /help9"));
+        assert!(!rendered.contains(" /help10"));
+    }
+
+    #[test]
+    fn dropdown_scrolls_when_selection_moves_past_visible_window() {
+        let options = (1..=10).map(|index| {
+            (
+                format!("help{index}"),
+                format!("Show available command {index}"),
+            )
+        });
+        let mut input = SlashInput::new(options);
+        type_text(&mut input, "/h");
+
+        for _ in 0..8 {
+            input.handle_key(KeyEvent::plain(KeyCode::Down));
+        }
+
+        let rendered = input.render().as_string();
+
+        assert_eq!(input.selected_command(), Some("help9"));
+        assert!(!rendered.contains(" /help1"));
+        assert!(rendered.contains(" /help2"));
+        assert!(rendered.contains("\x1B[34m /help9"));
+        assert!(!rendered.contains(" /help10"));
+    }
+
+    #[test]
+    fn dropdown_selection_wraps_between_first_and_last_options() {
+        let options = (1..=10).map(|index| {
+            (
+                format!("help{index}"),
+                format!("Show available command {index}"),
+            )
+        });
+        let mut input = SlashInput::new(options);
+        type_text(&mut input, "/h");
+
+        input.handle_key(KeyEvent::plain(KeyCode::Up));
+        assert_eq!(input.selected_command(), Some("help10"));
+
+        let wrapped_to_last = input.render();
+        assert!(wrapped_to_last.lines[3 + DROPDOWN_TOP_PADDING].contains(" /help3"));
+        assert!(wrapped_to_last.lines.last().is_some_and(|line| line.contains("\x1B[34m /help10")));
+
+        input.handle_key(KeyEvent::plain(KeyCode::Down));
+        assert_eq!(input.selected_command(), Some("help1"));
+
+        let wrapped_to_first = input.render();
+        assert!(wrapped_to_first.lines[3 + DROPDOWN_TOP_PADDING].contains("\x1B[34m /help1"));
+        assert!(wrapped_to_first.lines.last().is_some_and(|line| line.contains(" /help8")));
+    }
+
+    #[test]
+    fn render_with_terminal_width_uses_available_columns() {
+        let mut input = SlashInput::new(["help"]);
+        type_text(&mut input, "hello");
+
+        let view = input.render_with_terminal_width(40);
+        let width = content_width_from_terminal_columns(40);
+        let border = " ".repeat(width + 2);
+        let line = format!(" hello{} ", " ".repeat(width - "hello".chars().count()));
+
+        assert_eq!(view.lines[0], border);
+        assert_eq!(view.lines[1], line);
+        assert_eq!(view.lines[2], border);
     }
 }

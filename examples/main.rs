@@ -23,6 +23,13 @@ mod unix_demo {
         ("history", "View recent commands"),
         ("theme", "Change terminal colors"),
         ("clear", "Clear the current session"),
+        ("status", "Inspect the current environment"),
+        ("search", "Find a command or snippet"),
+        ("settings", "Open terminal preferences"),
+        ("profile", "Switch the active profile"),
+        ("export", "Export the current output"),
+        ("reload", "Reload the current context"),
+        ("version", "Show the current version"),
         ("quit", "Exit the current prompt"),
     ];
 
@@ -134,7 +141,7 @@ mod unix_demo {
         clipboard: &str,
         status: &str,
     ) -> io::Result<()> {
-        let view = input.render();
+        let view = input.render_with_terminal_width(terminal_columns()?);
 
         write!(output, "\x1B[2J\x1B[H")?;
         for line in HELP_LINES {
@@ -280,6 +287,17 @@ mod unix_demo {
 
     fn write_line<W: Write>(output: &mut W, line: &str) -> io::Result<()> {
         write!(output, "{line}\r\n")
+    }
+
+    fn terminal_columns() -> io::Result<usize> {
+        let size = run_stty_capture(["size"])?;
+        let columns = size
+            .split_whitespace()
+            .nth(1)
+            .ok_or_else(|| io::Error::other("failed to parse terminal columns"))?;
+        columns
+            .parse::<usize>()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
     fn run_stty<I, S>(args: I) -> io::Result<()>
