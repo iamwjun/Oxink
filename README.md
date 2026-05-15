@@ -28,22 +28,6 @@ building terminal output.
   white/unselected plus blue/selected text.
 - Zero runtime dependencies.
 
-## Installation
-
-Add Oxink to your `Cargo.toml`:
-
-```toml
-[dependencies]
-oxink = "0.1.3"
-```
-
-If you are using the local repository directly:
-
-```toml
-[dependencies]
-oxink = { path = "path/to/Oxink" }
-```
-
 ## Usage
 
 Style output:
