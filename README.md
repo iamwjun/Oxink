@@ -1,8 +1,9 @@
 # Oxink
 
-Oxink is a small Rust library for CLI rendering primitives. It exposes ANSI
-style codes, foreground/background color helpers, and color conversion utilities
-that are useful when building terminal output.
+Oxink is a small Rust library for CLI rendering primitives and terminal input
+state. It exposes ANSI style codes, foreground/background color helpers, color
+conversion utilities, and a slash-command input component that are useful when
+building terminal output.
 
 ## Features
 
@@ -11,6 +12,18 @@ that are useful when building terminal output.
 - ANSI foreground and background colors, including bright color variants.
 - Helpers for ANSI 16-color, 256-color, and truecolor escape sequences.
 - RGB and Hex conversion helpers for ANSI 256-color and ANSI 16-color output.
+- `input::SlashInput` for command-style terminal inputs with dropdown options.
+- Dynamic dropdown options with `command` and `description` values that can be
+  replaced from outside with `set_options`.
+- Input width can be overridden from outside and reset back to
+  `DEFAULT_INPUT_WIDTH`.
+- Input rendering themes with ANSI foreground/background colors and selected-row
+  styling.
+- Slash selection applies `/command ` automatically and renders the command
+  segment in blue.
+- Dropdown suggestions render descriptions after commands, use extra vertical
+  spacing, align descriptions to the longest visible command, and default to
+  white/unselected plus blue/selected text.
 - Zero runtime dependencies.
 
 ## Installation
@@ -19,7 +32,7 @@ Add Oxink to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxink = "0.1.0"
+oxink = "0.1.1"
 ```
 
 If you are using the local repository directly:
@@ -30,6 +43,8 @@ oxink = { path = "path/to/Oxink" }
 ```
 
 ## Usage
+
+Style output:
 
 ```rust
 use oxink::styles::{ANSI_STYLES, BOLD, RED};
@@ -47,6 +62,81 @@ fn main() {
     let orange = ANSI_STYLES.color.ansi256(ANSI_STYLES.hex_to_ansi256("#ff8800"));
     println!("{orange}warning\x1B[39m");
 }
+```
+
+Build a slash-command input:
+
+```rust
+use oxink::input::{
+    DEFAULT_INPUT_WIDTH, InputAction, InputTheme, KeyCode, KeyEvent, SlashInput,
+    TerminalColor,
+};
+
+let mut input = SlashInput::new([
+    ("help", "Show available commands"),
+    ("history", "View recent commands"),
+    ("quit", "Exit the prompt"),
+])
+.with_input_width(Some(DEFAULT_INPUT_WIDTH + 8))
+.with_theme(
+    InputTheme::ocean()
+        .with_background_color(TerminalColor::Ansi256(236))
+        .with_selected_background_color(TerminalColor::Ansi256(31)),
+);
+
+input.handle_key(KeyEvent::plain(KeyCode::Char('/')));
+input.handle_key(KeyEvent::plain(KeyCode::Char('h')));
+input.handle_key(KeyEvent::plain(KeyCode::Down));
+
+assert_eq!(
+    input.handle_key(KeyEvent::plain(KeyCode::Enter)),
+    InputAction::SuggestionApplied("/history ".to_string())
+);
+assert_eq!(input.value(), "/history ");
+
+let view = input.render();
+println!("{view}");
+```
+
+Rendered preview:
+
+![SlashInput preview](docs/slash-input-demo.svg)
+
+Update dropdown options from outside:
+
+```rust
+use oxink::input::{InputOption, SlashInput};
+
+let mut input = SlashInput::new(["help", "quit"]);
+input.set_options([
+    ("history", "View recent commands"),
+    InputOption::new("theme", "Change terminal colors"),
+    ("clear", "Clear the current session"),
+]);
+
+assert_eq!(
+    input
+        .options()
+        .iter()
+        .map(|option| (option.command.as_str(), option.description.as_str()))
+        .collect::<Vec<_>>(),
+    vec![
+        ("history", "View recent commands"),
+        ("theme", "Change terminal colors"),
+        ("clear", "Clear the current session"),
+    ]
+);
+```
+
+Configure the input width from outside:
+
+```rust
+use oxink::input::{DEFAULT_INPUT_WIDTH, SlashInput};
+
+let mut input = SlashInput::new(["help"]).with_input_width(Some(40));
+input.set_input_width(None);
+
+let _resolved_width = DEFAULT_INPUT_WIDTH;
 ```
 
 Generate escape sequences directly:
@@ -73,6 +163,55 @@ assert_eq!(rgb_to_ansi(255, 0, 0), 91);
 ```
 
 ## API Overview
+
+### Input Component
+
+`SlashInput` is a pure state machine for terminal-style command input:
+
+```rust
+use oxink::input::{KeyCode, KeyEvent, SlashInput};
+
+let mut input = SlashInput::new([
+    ("help", "Show available commands"),
+    ("history", "View recent commands"),
+]);
+
+input.handle_key(KeyEvent::plain(KeyCode::Char('/')));
+input.handle_key(KeyEvent::plain(KeyCode::Char('h')));
+
+assert!(input.is_dropdown_visible());
+assert_eq!(input.filtered_commands(), vec!["help", "history"]);
+assert_eq!(
+    input
+        .filtered_options()
+        .into_iter()
+        .map(|option| (option.command.as_str(), option.description.as_str()))
+        .collect::<Vec<_>>(),
+    vec![
+        ("help", "Show available commands"),
+        ("history", "View recent commands"),
+    ]
+);
+```
+
+The component supports:
+
+- Normal text input, cursor movement, backspace, and delete.
+- Copy and paste shortcuts via `InputAction::CopyRequested` and
+  `InputAction::PasteRequested`.
+- `/` as the first character to open a filtered dropdown.
+- Suggestions support both `command` and `description`, and matching is done
+  against the command.
+- `filtered_options()` returns `InputOption` references, while
+  `filtered_commands()` remains available as a command-only helper.
+- `Up` and `Down` to change the highlighted option.
+- `Enter` or `Tab` to apply the current option as `/command `.
+- `Enter` without an open dropdown to submit and clear the input.
+- `with_input_width(...)` and `set_input_width(...)` let callers override the
+  default width or fall back to `DEFAULT_INPUT_WIDTH`.
+
+`InputTheme` controls border, text, background, suggestion, and selected-row
+colors. `TerminalColor` accepts ANSI 16-color, ANSI 256-color, or RGB values.
 
 ### Style Codes
 
@@ -150,6 +289,12 @@ Run the test suite:
 
 ```sh
 cargo test
+```
+
+Run the interactive input example:
+
+```sh
+cargo run --example main
 ```
 
 Format the code:
