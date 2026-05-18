@@ -1,6 +1,6 @@
 [package]
 name = "oxink"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 description = "ANSI styling, terminal color helpers, and slash-command input components for Rust CLIs."
 license = "MIT"
